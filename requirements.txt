@@ -1,4 +1,4 @@
+streamlit
 ultralytics
-PIL
-tempfile
-os
+pillow
+opencv-python-headless
