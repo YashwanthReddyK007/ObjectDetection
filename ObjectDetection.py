@@ -1,124 +1,65 @@
 import streamlit as st
-import os
-import tempfile
-import cv2
-import torch
-import open_clip
-import faiss
-import numpy as np
+from ultralytics import YOLO
 from PIL import Image
-from pathlib import Path
+import tempfile
+import os
 
-# ---------------------------
-# Load CLIP model
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion400m_e32')
-model = model.to(device)
-tokenizer = open_clip.get_tokenizer('ViT-B-32')
+# =========================
+# Load YOLOv8 model (nano version, change to yolov8s.pt for more accuracy)
+# =========================
+@st.cache_resource
+def load_model():
+    return YOLO('yolov8n.pt')
 
-# ---------------------------
-# Helper: extract frames from a video
-def extract_frames(video_path, fps_extract=1):
-    frames = []
-    timestamps = []
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_num = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if int(frame_num % max(int(fps / fps_extract),1)) == 0:
-            # save frame to memory
-            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(Image.fromarray(img_rgb))
-            timestamps.append(frame_num / fps)
-        frame_num += 1
-    cap.release()
-    return frames, timestamps
+model = load_model()
 
-# ---------------------------
-# Helper: embed images
-def embed_images(images):
-    all_feats = []
-    with torch.no_grad():
-        for img in images:
-            img_prep = preprocess(img).unsqueeze(0).to(device)
-            feat = model.encode_image(img_prep)
-            feat /= feat.norm(dim=-1, keepdim=True)
-            all_feats.append(feat.cpu().numpy())
-    return np.vstack(all_feats)
-
-# ---------------------------
+# =========================
 # Streamlit UI
-st.title("🔎 Media Search with AI")
+# =========================
+st.set_page_config(page_title="YOLO Object Recognition", layout="wide")
+st.title("🖼️🔎 YOLOv8 Object Recognition App")
+st.write("Upload one or more images, and I'll detect objects in them using YOLOv8!")
 
-uploaded_files = st.file_uploader("Upload Images or Videos", type=["jpg","jpeg","png","mp4","avi","mov"], accept_multiple_files=True)
-query = st.text_input("Enter a text to search (e.g., 'car', 'road', 'wind turbine'):")
+uploaded_files = st.file_uploader(
+    "Choose image files", 
+    type=["jpg", "jpeg", "png"], 
+    accept_multiple_files=True
+)
 
-if st.button("Run Search"):
-    if not uploaded_files or not query:
-        st.error("Please upload files and enter a search query.")
-    else:
-        st.info("🔄 Processing files… this might take a moment.")
-        # Temporary folder
+if uploaded_files:
+    for uploaded_file in uploaded_files:
+        # Save uploaded file to a temporary file
         temp_dir = tempfile.mkdtemp()
-        embeddings = []
-        metadata = []  # (filename, timestamp/frame_idx)
-        for f in uploaded_files:
-            file_path = os.path.join(temp_dir, f.name)
-            with open(file_path, "wb") as out:
-                out.write(f.read())
-            if f.name.lower().endswith((".jpg",".jpeg",".png")):
-                img = Image.open(file_path).convert("RGB")
-                embeddings.append(embed_images([img]))
-                metadata.append((f.name, None))
-            else:
-                # It's a video
-                frames, times = extract_frames(file_path)
-                if frames:
-                    feats = embed_images(frames)
-                    embeddings.append(feats)
-                    for t in times:
-                        metadata.append((f.name, t))
-        if embeddings:
-            embeddings = np.vstack(embeddings)
+        temp_path = os.path.join(temp_dir, uploaded_file.name)
+        with open(temp_path, "wb") as f:
+            f.write(uploaded_file.read())
+        
+        # Display original image
+        st.subheader(f"Original Image: {uploaded_file.name}")
+        st.image(Image.open(temp_path), caption="Uploaded Image", use_column_width=True)
+
+        # Run YOLOv8 detection
+        st.info("🔄 Running object detection...")
+        results = model(temp_path, save=True)
+
+        # Get detection results
+        result = results[0]
+        detected_image_path = result.save_dir / uploaded_file.name  # saved in runs/detect/predict
+
+        # Show detected image
+        st.subheader("✅ Detection Results")
+        st.image(str(detected_image_path), caption="Detected Objects", use_column_width=True)
+
+        # List detected objects
+        st.subheader("📋 Detected Objects")
+        if len(result.boxes) == 0:
+            st.write("❌ No objects detected.")
         else:
-            st.warning("No valid media files processed.")
-            st.stop()
+            for box in result.boxes:
+                cls_id = int(box.cls[0])
+                label = result.names[cls_id]
+                conf = float(box.conf[0])
+                st.write(f"- **{label}** with confidence `{conf:.2f}`")
 
-        # Build FAISS index
-        dim = embeddings.shape[1]
-        index = faiss.IndexFlatIP(dim)
-        faiss.normalize_L2(embeddings)
-        index.add(embeddings)
-
-        # Query
-        text_tokens = tokenizer([query]).to(device)
-        with torch.no_grad():
-            text_feat = model.encode_text(text_tokens)
-            text_feat /= text_feat.norm(dim=-1, keepdim=True)
-        text_np = text_feat.cpu().numpy()
-        D, I = index.search(text_np, k=5)
-
-        # Show results
-        st.subheader("✅ Top Matches")
-        for rank, idx in enumerate(I[0]):
-            fname, ts = metadata[idx]
-            st.write(f"**{rank+1}. File:** {fname}")
-            if ts is not None:
-                st.write(f"⏱ Timestamp: {ts:.2f} seconds")
-            # Display image or frame preview
-            if fname.lower().endswith((".jpg",".jpeg",".png")):
-                st.image(os.path.join(temp_dir, fname), caption=fname)
-            else:
-                # For videos, re-extract that frame
-                vidcap = cv2.VideoCapture(os.path.join(temp_dir, fname))
-                fps = vidcap.get(cv2.CAP_PROP_FPS)
-                frame_number = int(ts * fps)
-                vidcap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
-                ret, frame = vidcap.read()
-                vidcap.release()
-                if ret:
-                    img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    st.image(img_rgb, caption=f"{fname} @ {ts:.2f}s")
+st.markdown("---")
+st.caption("Built with ❤️ using YOLOv8 and Streamlit")
