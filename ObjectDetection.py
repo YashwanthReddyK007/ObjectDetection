@@ -5,7 +5,7 @@ import tempfile
 import os
 
 # =========================
-# Load YOLOv8 model (nano version, change to yolov8s.pt for more accuracy)
+# Load YOLOv8 model (nano version)
 # =========================
 @st.cache_resource
 def load_model():
@@ -21,14 +21,14 @@ st.title("🖼️🔎 YOLOv8 Object Recognition App")
 st.write("Upload one or more images, and I'll detect objects in them using YOLOv8!")
 
 uploaded_files = st.file_uploader(
-    "Choose image files", 
-    type=["jpg", "jpeg", "png"], 
+    "Choose image files",
+    type=["jpg", "jpeg", "png"],
     accept_multiple_files=True
 )
 
 if uploaded_files:
     for uploaded_file in uploaded_files:
-        # Save uploaded file to a temporary file
+        # Save uploaded file to a temporary location
         temp_dir = tempfile.mkdtemp()
         temp_path = os.path.join(temp_dir, uploaded_file.name)
         with open(temp_path, "wb") as f:
@@ -44,11 +44,12 @@ if uploaded_files:
 
         # Get detection results
         result = results[0]
-        detected_image_path = result.save_dir / uploaded_file.name  # saved in runs/detect/predict
+        # ✅ FIX: join paths properly
+        detected_image_path = os.path.join(result.save_dir, uploaded_file.name)
 
         # Show detected image
         st.subheader("✅ Detection Results")
-        st.image(str(detected_image_path), caption="Detected Objects", use_column_width=True)
+        st.image(detected_image_path, caption="Detected Objects", use_column_width=True)
 
         # List detected objects
         st.subheader("📋 Detected Objects")
